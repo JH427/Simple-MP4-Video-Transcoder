@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Video Transcoder to MP4</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #progress { margin-top: 10px; }
+        #progressBar {
+            width: 100%;
+            background-color: #ddd;
+        }
+        #progressBarFill {
+            width: 0%;
+            height: 20px;
+            background-color: #4caf50;
+        }
+        video { display: none; }
+    </style>
+</head>
+<body>
+    <h1>Video Transcoder to MP4</h1>
+    <input type="file" id="fileInput" accept="video/*"><br><br>
+    <label for="codecSelect">Select Output Codec:</label>
+    <select id="codecSelect">
+        <option value="avc1.42E01E">H.264</option>
+    </select><br><br>
+    <button id="startButton">Start Transcoding</button>
+    <button id="downloadButton" disabled>Download Output</button>
+    <div id="progress"></div>
+    <div id="progressBar">
+        <div id="progressBarFill"></div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const codecSelect = document.getElementById('codecSelect');
+        const startButton = document.getElementById('startButton');
+        const downloadButton = document.getElementById('downloadButton');
+        const progressDiv = document.getElementById('progress');
+        const progressBarFill = document.getElementById('progressBarFill');
+
+        let mp4Blob; // Declare mp4Blob for access in click handler
+        let codec; // Declare codec at the global scope
+
+        downloadButton.addEventListener('click', () => {
+            if (!mp4Blob) {
+                alert('No file available to download.');
+                return;
+            }
+            const downloadURL = URL.createObjectURL(mp4Blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = downloadURL;
+            a.download = `output_${codec}.mp4`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(downloadURL);
+        });
+
+        startButton.addEventListener('click', async () => {
+            if (!fileInput.files[0]) {
+                alert('Please select a video file.');
+                return;
+            }
+
+            const file = fileInput.files[0];
+            codec = codecSelect.value; // Assign value to the globally declared codec
+
+            startButton.disabled = true;
+            downloadButton.disabled = true;
+            progressDiv.textContent = 'Preparing to transcode...';
+
+            const arrayBuffer = await file.arrayBuffer();
+            const videoBlob = new Blob([arrayBuffer], { type: file.type });
+            const videoURL = URL.createObjectURL(videoBlob);
+
+            const video = document.createElement('video');
+            video.src = videoURL;
+
+            // Wait for video metadata to load
+            await new Promise((resolve) => {
+                video.addEventListener('loadedmetadata', resolve);
+            });
+
+            const width = video.videoWidth;
+            const height = video.videoHeight;
+            const duration = video.duration;
+            const fps = 30; // Using 30 FPS for simplicity
+            const totalFrames = Math.ceil(duration * fps);
+
+            // Check codec support
+            const videoSupport = await VideoEncoder.isConfigSupported({ codec, width, height });
+            if (!videoSupport.supported) {
+                alert('The selected video codec is not supported.');
+                startButton.disabled = false;
+                return;
+            }
+
+            const audioCodec = 'mp4a.40.2'; // AAC Low Complexity
+            const audioSupport = await AudioEncoder.isConfigSupported({ codec: audioCodec, sampleRate: 48000, numberOfChannels: 2 });
+            if (!audioSupport.supported) {
+                alert('The selected audio codec is not supported.');
+                startButton.disabled = false;
+                return;
+            }
+
+            const mediaStream = video.captureStream(fps);
+
+            // Initialize processors and readers for video and audio tracks
+            const videoTrack = mediaStream.getVideoTracks()[0];
+            const audioTrack = mediaStream.getAudioTracks()[0];
+
+            if (!audioTrack) {
+                alert('No audio track found in the selected video.');
+                startButton.disabled = false;
+                return;
+            }
+
+            const videoProcessor = new MediaStreamTrackProcessor(videoTrack);
+            const videoReader = videoProcessor.readable.getReader();
+
+            const audioProcessor = new MediaStreamTrackProcessor(audioTrack);
+            const audioReader = audioProcessor.readable.getReader();
+
+            const encodedVideoChunks = [];
+            const encodedAudioChunks = [];
+            let frameCounter = 0;
+            let sps = null;
+            let pps = null;
+
+            const videoEncoderConfig = {
+                codec: codec,
+                width: width,
+                height: height,
+                bitrate: 5_000_000, // 5 Mbps
+                hardwareAcceleration: 'prefer-hardware',
+                avc: {
+                    format: 'annexb',
+                },
+            };
+
+            const videoEncoder = new VideoEncoder({
+                output: (chunk) => {
+                    const chunkData = new Uint8Array(chunk.byteLength);
+                    chunk.copyTo(chunkData);
+
+                    // Extract SPS and PPS from key frames for H.264
+                    if (chunk.type === 'key' && codec.startsWith('avc1')) {
+                        const { sps: spsData, pps: ppsData } = parseNALUnits(chunkData);
+                        if (spsData && !sps) {
+                            sps = spsData;
+                            console.log('SPS extracted:', sps);
+                        }
+                        if (ppsData && !pps) {
+                            pps = ppsData;
+                            console.log('PPS extracted:', pps);
+                        }
+                    }
+
+                    // Remove start codes and replace with length prefixes
+                    const lengthPrefixedData = replaceStartCodesWithLength(chunkData);
+
+                    encodedVideoChunks.push({
+                        data: lengthPrefixedData,
+                        type: chunk.type,
+                        timestamp: chunk.timestamp,
+                        duration: chunk.duration,
+                    });
+
+                    frameCounter++;
+                    const progressPercent = ((frameCounter / totalFrames) * 100).toFixed(2);
+                    progressDiv.textContent = `Transcoding... ${frameCounter}/${totalFrames} frames processed (${progressPercent}%)`;
+                    progressBarFill.style.width = `${progressPercent}%`;
+                },
+                error: (error) => {
+                    console.error('Video encoding error:', error);
+                },
+            });
+
+            videoEncoder.configure(videoEncoderConfig);
+
+            const audioEncoderConfig = {
+                codec: audioCodec,
+                sampleRate: 48000,
+                numberOfChannels: 2,
+                bitrate: 128_000, // 128 kbps
+            };
+
+            const audioEncoder = new AudioEncoder({
+                output: (chunk) => {
+                    const chunkData = new Uint8Array(chunk.byteLength);
+                    chunk.copyTo(chunkData);
+
+                    encodedAudioChunks.push({
+                        data: chunkData,
+                        timestamp: chunk.timestamp,
+                        duration: chunk.duration,
+                    });
+                },
+                error: (error) => {
+                    console.error('Audio encoding error:', error);
+                    alert('Audio encoding error occurred. The output video will not have audio.');
+                },
+            });
+
+            audioEncoder.configure(audioEncoderConfig);
+
+            // Start video playback to enable frame capture
+            video.play();
+
+            // Read and encode frames
+            async function readVideoFrame() {
+                const result = await videoReader.read();
+                if (result.done) {
+                    await videoEncoder.flush();
+                    videoDone = true;
+                    checkCompletion();
+                    return;
+                }
+                const videoFrame = result.value;
+                videoEncoder.encode(videoFrame, { timestamp: videoFrame.timestamp });
+                videoFrame.close();
+                readVideoFrame();
+            }
+
+            async function readAudioFrame() {
+                const result = await audioReader.read();
+                if (result.done) {
+                    await audioEncoder.flush();
+                    audioDone = true;
+                    checkCompletion();
+                    return;
+                }
+                const audioData = result.value;
+                audioEncoder.encode(audioData);
+                audioData.close();
+                readAudioFrame();
+            }
+
+            let videoDone = false;
+            let audioDone = false;
+
+            function checkCompletion() {
+                if (videoDone && audioDone) {
+                    finalizeMP4();
+                }
+            }
+
+            readVideoFrame();
+            readAudioFrame();
+
+            const finalizeMP4 = () => {
+                if (!sps || !pps) {
+                    alert('Failed to extract SPS and PPS from the encoded data. Cannot create MP4 file.');
+                    startButton.disabled = false;
+                    progressDiv.textContent = 'Transcoding failed.';
+                    return;
+                }
+
+                console.log('encodedVideoChunks:', encodedVideoChunks);
+                console.log('encodedAudioChunks:', encodedAudioChunks);
+                
+                // Check if audio chunks are available
+                if (!encodedAudioChunks || encodedAudioChunks.length === 0) {
+                    alert('Audio encoding failed or no audio data was found. The output video will not have audio.');
+                    encodedAudioChunks = []; // Ensure it's an empty array
+                }
+
+                progressDiv.textContent = 'Finalizing MP4 file...';
+
+                const mp4File = createMP4File(
+                    encodedVideoChunks,
+                    encodedAudioChunks,
+                    width,
+                    height,
+                    sps,
+                    pps,
+                    fps,
+                    duration
+                );
+
+                mp4Blob = new Blob([mp4File], { type: 'video/mp4' });
+                downloadButton.disabled = false;
+                startButton.disabled = false;
+                progressDiv.textContent = 'Transcoding complete.';
+                progressBarFill.style.width = `100%`;
+                // Stop the video playback
+                video.pause();
+                video.src = '';
+            };
+
+            function parseNALUnits(data) {
+                let offset = 0;
+                let sps = null;
+                let pps = null;
+
+                while (offset < data.byteLength - 3) {
+                    // Check for start codes (0x000001 or 0x00000001)
+                    let startCodeLength = 0;
+                    if (data[offset] === 0x00 && data[offset + 1] === 0x00) {
+                        if (data[offset + 2] === 0x01) {
+                            startCodeLength = 3;
+                        } else if (data[offset + 2] === 0x00 && data[offset + 3] === 0x01) {
+                            startCodeLength = 4;
+                        }
+                    }
+
+                    if (startCodeLength > 0) {
+                        offset += startCodeLength;
+                        if (offset >= data.byteLength) break;
+
+                        const nalUnitType = data[offset] & 0x1f;
+                        let nalUnitStart = offset;
+                        offset++;
+
+                        // Find the next start code
+                        let nalUnitEnd = data.byteLength;
+                        for (let i = offset; i < data.byteLength - 3; i++) {
+                            if (
+                                data[i] === 0x00 &&
+                                data[i + 1] === 0x00 &&
+                                (data[i + 2] === 0x01 ||
+                                    (data[i + 2] === 0x00 && data[i + 3] === 0x01))
+                            ) {
+                                nalUnitEnd = i;
+                                break;
+                            }
+                        }
+
+                        const nalUnit = data.slice(nalUnitStart, nalUnitEnd);
+
+                        if (nalUnitType === 7 && !sps) {
+                            sps = nalUnit;
+                            console.log('SPS NAL unit found');
+                        } else if (nalUnitType === 8 && !pps) {
+                            pps = nalUnit;
+                            console.log('PPS NAL unit found');
+                        }
+
+                        offset = nalUnitEnd;
+                    } else {
+                        offset++;
+                    }
+                }
+                return { sps, pps };
+            }
+
+            function replaceStartCodesWithLength(data) {
+                const units = [];
+                let offset = 0;
+
+                while (offset < data.byteLength) {
+                    // Find the start code
+                    let start = -1;
+                    let end = data.byteLength;
+
+                    if (data[offset] === 0x00 && data[offset + 1] === 0x00) {
+                        if (data[offset + 2] === 0x01) {
+                            start = offset + 3;
+                        } else if (data[offset + 2] === 0x00 && data[offset + 3] === 0x01) {
+                            start = offset + 4;
+                        }
+                    }
+
+                    if (start === -1) {
+                        // No more NAL units
+                        break;
+                    }
+
+                    // Find the next start code
+                    for (let i = start; i < data.byteLength - 3; i++) {
+                        if (
+                            data[i] === 0x00 &&
+                            data[i + 1] === 0x00 &&
+                            (data[i + 2] === 0x01 ||
+                                (data[i + 2] === 0x00 && data[i + 3] === 0x01))
+                        ) {
+                            end = i;
+                            break;
+                        }
+                    }
+
+                    const nalUnit = data.slice(start, end);
+                    const length = nalUnit.length;
+                    const lengthBytes = new Uint8Array(4);
+                    const view = new DataView(lengthBytes.buffer);
+                    view.setUint32(0, length);
+                    units.push(lengthBytes, nalUnit);
+                    offset = end;
+                }
+
+                // Concatenate all units
+                return concatUint8Arrays(units);
+            }
+
+            function createMP4File(videoChunks, audioChunks = [], width, height, sps, pps, fps, duration) {
+                const timescale = 90000; // Common timescale for video
+                const audioTimescale = 48000; // Common timescale for audio
+                const trackIdVideo = 1;
+                const trackIdAudio = 2;
+                const videoDuration = Math.round(duration * timescale);
+                const audioDuration = Math.round(duration * audioTimescale);
+                const videoSampleDelta = Math.round(timescale / fps);
+            
+                // Helper functions to create MP4 boxes
+                function createBox(type, ...payload) {
+                    const size = 8 + payload.reduce((sum, curr) => sum + curr.length, 0);
+                    const buffer = new Uint8Array(size);
+                    const view = new DataView(buffer.buffer);
+                    view.setUint32(0, size);
+                    buffer.set([type.charCodeAt(0), type.charCodeAt(1), type.charCodeAt(2), type.charCodeAt(3)], 4);
+                    let offset = 8;
+                    for (const data of payload) {
+                        buffer.set(data, offset);
+                        offset += data.length;
+                    }
+                    return buffer;
+                }
+
+                // Check if audio is present
+                const hasAudio = audioChunks.length > 0;
+            
+                // Create ftyp box
+                const ftypBox = createFtypBox();
+
+                // Create mdat box
+                const mdatData = concatUint8Arrays([
+                    ...videoChunks.map(chunk => chunk.data),
+                    ...audioChunks.map(chunk => chunk.data),
+                ]);
+                const mdatBox = createBox('mdat', mdatData);
+
+                // Now create moov box
+                const moovBox = createMoovBox();
+
+                // Combine all boxes into the final MP4 file
+                const mp4File = concatUint8Arrays([ftypBox, mdatBox, moovBox]);
+
+                return mp4File;
+            
+                // Helper function definitions
+            
+                function createFtypBox() {
+                    const majorBrand = 'isom';
+                    const minorVersion = new Uint8Array([0, 0, 0, 1]);
+                    const compatibleBrands = 'isomiso2avc1mp41';
+                    const data = new Uint8Array(4 + 4 + compatibleBrands.length);
+                    let offset = 0;
+            
+                    for (let i = 0; i < 4; i++) {
+                        data[offset++] = majorBrand.charCodeAt(i);
+                    }
+                    data.set(minorVersion, offset);
+                    offset += 4;
+                    for (let i = 0; i < compatibleBrands.length; i++) {
+                        data[offset++] = compatibleBrands.charCodeAt(i);
+                    }
+            
+                    return createBox('ftyp', data);
+                }
+            
+                function createMoovBox() {
+                    const mvhdBox = createMvhdBox(timescale, videoDuration);
+                    const videoTrakBox = createVideoTrackBox();
+                    let boxes = [mvhdBox, videoTrakBox];
+                
+                    if (audioChunks.length > 0) {
+                        const audioTrakBox = createAudioTrackBox();
+                        boxes.push(audioTrakBox);
+                    }
+                
+                    return createBox('moov', ...boxes);
+                }
+                
+            
+                function createMvhdBox(timescale, duration) {
+                    const data = new Uint8Array(108);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint8(0, 0); // version
+                    view.setUint32(4, 0); // creation_time
+                    view.setUint32(8, 0); // modification_time
+                    view.setUint32(12, timescale); // timescale
+                    view.setUint32(16, duration); // duration
+                    view.setUint32(20, 0x00010000); // rate
+                    view.setUint16(24, 0x0100); // volume
+                    // Remaining fields can be left as zeros
+            
+                    return createBox('mvhd', data);
+                }
+            
+                function createVideoTrackBox() {
+                    // tkhd box
+                    const tkhdBox = createTkhdBox(trackIdVideo, videoDuration, width, height);
+            
+                    // mdia box
+                    const mdhdBox = createMdhdBox(timescale, videoDuration);
+                    const hdlrBox = createHdlrBox('vide', 'VideoHandler');
+            
+                    const stsdBox = createVideoStsdBox(sps, pps, width, height);
+                    const sttsBox = createSttsBox(videoChunks);
+                    const stscBox = createStscBox(videoChunks.length);
+                    const stszBox = createStszBox(videoChunks);
+                    const stcoBox = createStcoBox(videoChunks, audioChunks, false);
+            
+                    const stblBox = createStblBox(stsdBox, sttsBox, stscBox, stszBox, stcoBox);
+                    const vmhdBox = createVmhdBox();
+                    const dinfBox = createDinfBox();
+                    const minfBox = createMinfBox(vmhdBox, dinfBox, stblBox);
+            
+                    const mdiaBox = createMdiaBox(mdhdBox, hdlrBox, minfBox);
+            
+                    // trak box
+                    return createTrakBox(tkhdBox, mdiaBox);
+                }
+            
+                function createAudioTrackBox() {
+                    // tkhd box
+                    const tkhdBox = createTkhdBox(trackIdAudio, audioDuration, 0, 0);
+            
+                    // mdia box
+                    const mdhdBox = createMdhdBox(audioTimescale, audioDuration);
+                    const hdlrBox = createHdlrBox('soun', 'SoundHandler');
+            
+                    const stsdBox = createAudioStsdBox();
+                    const sttsBox = createAudioSttsBox(audioChunks);
+                    const stscBox = createStscBox(audioChunks.length);
+                    const stszBox = createStszBox(audioChunks);
+                    const stcoBox = createStcoBox(audioChunks, videoChunks, true);
+            
+                    const stblBox = createStblBox(stsdBox, sttsBox, stscBox, stszBox, stcoBox);
+                    const smhdBox = createSmhdBox();
+                    const dinfBox = createDinfBox();
+                    const minfBox = createMinfBox(smhdBox, dinfBox, stblBox);
+            
+                    const mdiaBox = createMdiaBox(mdhdBox, hdlrBox, minfBox);
+            
+                    // trak box
+                    return createTrakBox(tkhdBox, mdiaBox);
+                }
+            
+                function createTkhdBox(trackId, duration, width, height) {
+                    const data = new Uint8Array(92);
+                    const view = new DataView(data.buffer);
+                
+                    view.setUint8(0, 0); // version
+                    view.setUint32(4, 0x00000007); // flags
+                    view.setUint32(8, 0); // creation_time
+                    view.setUint32(12, 0); // modification_time
+                    view.setUint32(16, trackId); // track_ID
+                    view.setUint32(20, 0); // reserved
+                    view.setUint32(24, duration); // duration
+                    // Reserved fields
+                    view.setUint32(28, 0);
+                    view.setUint32(32, 0);
+                    view.setUint16(36, 0); // layer
+                    view.setUint16(38, 0); // alternate_group
+                    view.setUint16(40, trackId === trackIdAudio ? 0x0100 : 0); // volume
+                    view.setUint16(42, 0); // reserved
+                
+                    // Transformation matrix
+                    view.setUint32(40, 0x00010000); // a (1.0)
+                    view.setUint32(44, 0);          // b (0.0)
+                    view.setUint32(48, 0);          // u (0.0)
+                    view.setUint32(52, 0);          // c (0.0)
+                    view.setUint32(56, 0x00010000); // d (1.0)
+                    view.setUint32(60, 0);          // v (0.0)
+                    view.setUint32(64, 0);          // tx (0.0)
+                    view.setUint32(68, 0);          // ty (0.0)
+                    view.setUint32(72, 0x00010000); // tz (should be 1.0 in 16.16 fixed-point)
+
+                
+                    view.setUint32(80, width << 16); // width
+                    view.setUint32(84, height << 16); // height
+                
+                    return createBox('tkhd', data);
+                }
+                
+            
+                function createMdhdBox(timescale, duration) {
+                    const data = new Uint8Array(32);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint8(0, 0); // version
+                    view.setUint32(4, 0); // creation_time
+                    view.setUint32(8, 0); // modification_time
+                    view.setUint32(12, timescale); // timescale
+                    view.setUint32(16, duration); // duration
+                    view.setUint16(20, 0x55c4); // language (und)
+                    view.setUint16(22, 0); // pre_defined
+            
+                    return createBox('mdhd', data);
+                }
+            
+                function createHdlrBox(handlerType, name) {
+                    const nameBytes = new TextEncoder().encode(name);
+                    const data = new Uint8Array(24 + nameBytes.length + 1); // +1 for null terminator
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint8(0, 0); // version
+                    view.setUint32(4, 0); // pre_defined
+                    for (let i = 0; i < 4; i++) {
+                        data[8 + i] = handlerType.charCodeAt(i);
+                    }
+                    // Reserved
+                    data.set(new Uint8Array(12), 12);
+                    // Name (null-terminated string)
+                    data.set(nameBytes, 24);
+                    data[24 + nameBytes.length] = 0; // Null terminator
+            
+                    return createBox('hdlr', data);
+                }
+            
+                function createVmhdBox() {
+                    const data = new Uint8Array(12);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint8(0, 0); // version
+                    view.setUint32(4, 0x00000001); // flags
+                    view.setUint16(8, 0); // graphicsmode
+                    view.setUint16(10, 0); // opcolor
+            
+                    return createBox('vmhd', data);
+                }
+            
+                function createSmhdBox() {
+                    const data = new Uint8Array(8);
+                    const view = new DataView(data.buffer);
+                
+                    view.setUint8(0, 0);    // version
+                    view.setUint8(1, 0);    // flags[0]
+                    view.setUint8(2, 0);    // flags[1]
+                    view.setUint8(3, 0);    // flags[2]
+                    view.setInt16(4, 0);    // balance (0 means centered)
+                    view.setUint16(6, 0);   // reserved
+                
+                    return createBox('smhd', data);
+                }
+                
+            
+                function createDinfBox() {
+                    const drefBox = createDrefBox();
+                    return createBox('dinf', drefBox);
+                }
+            
+                function createDrefBox() {
+                    const urlBox = createBox('url ', new Uint8Array([0, 0, 0, 1])); // Flags set to 1 (self-contained)
+                    const data = new Uint8Array(4 + urlBox.length);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint32(0, 1); // entry_count
+                    data.set(urlBox, 4);
+            
+                    return createBox('dref', data);
+                }
+            
+                function createVideoStsdBox(sps, pps, width, height) {
+                    const avc1Box = createAvc1Box(sps, pps, width, height);
+            
+                    const data = new Uint8Array(8 + avc1Box.length);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint32(0, 0); // version and flags
+                    view.setUint32(4, 1); // entry_count
+                    data.set(avc1Box, 8);
+            
+                    return createBox('stsd', data);
+                }
+            
+                function createAvc1Box(sps, pps, width, height) {
+                    const avcCBox = createAvcCBox(sps, pps);
+                
+                    const data = new Uint8Array(78 + avcCBox.length);
+                    const view = new DataView(data.buffer);
+                
+                    // Sample entry fields
+                    view.setUint32(0, 0);    // reserved
+                    view.setUint16(6, 1);    // data_reference_index
+                
+                    // Video sample entry fields
+                    view.setUint16(24, width);  // width
+                    view.setUint16(26, height); // height
+                    view.setUint32(28, 0x00480000); // horizresolution (72 dpi)
+                    view.setUint32(32, 0x00480000); // vertresolution (72 dpi)
+                    view.setUint32(36, 0);          // reserved
+                    view.setUint16(40, 1);          // frame_count
+                
+                    // Compressor name (32 bytes)
+                    for (let i = 0; i < 32; i++) {
+                        data[42 + i] = 0;
+                    }
+                
+                    view.setUint16(74, 0x0018); // depth
+                    view.setInt16(76, -1);      // pre_defined (-1)
+                
+                    data.set(avcCBox, 78);
+                
+                    return createBox('avc1', data);
+                }                
+            
+                function createAvcCBox(sps, pps) {
+                    const spsLength = sps.length;
+                    const ppsLength = pps.length;
+            
+                    const data = new Uint8Array(7 + 2 + spsLength + 1 + 2 + ppsLength);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint8(0, 1); // configurationVersion
+                    view.setUint8(1, sps[1]); // AVCProfileIndication
+                    view.setUint8(2, sps[2]); // profile_compatibility
+                    view.setUint8(3, sps[3]); // AVCLevelIndication
+                    view.setUint8(4, 0xff); // lengthSizeMinusOne
+            
+                    view.setUint8(5, 0xe1); // numOfSequenceParameterSets
+                    view.setUint16(6, spsLength);
+                    data.set(sps, 8);
+            
+                    const ppsStart = 8 + spsLength;
+                    view.setUint8(ppsStart, 1); // numOfPictureParameterSets
+                    view.setUint16(ppsStart + 1, ppsLength);
+                    data.set(pps, ppsStart + 3);
+            
+                    return createBox('avcC', data);
+                }
+            
+                function createAudioStsdBox() {
+                    const mp4aBox = createMp4aBox();
+            
+                    const data = new Uint8Array(8 + mp4aBox.length);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint32(0, 0); // version and flags
+                    view.setUint32(4, 1); // entry_count
+                    data.set(mp4aBox, 8);
+            
+                    return createBox('stsd', data);
+                }
+            
+                function createMp4aBox() {
+                    const esdsBox = createEsdsBox();
+            
+                    const data = new Uint8Array(28 + esdsBox.length);
+                    const view = new DataView(data.buffer);
+            
+                    // Sample entry fields
+                    view.setUint32(0, 0); // reserved
+                    view.setUint16(6, 1); // data_reference_index
+            
+                    // Audio sample entry fields
+                    view.setUint16(16, 2); // channelcount
+                    view.setUint16(18, 16); // samplesize
+                    view.setUint16(20, 0); // pre_defined
+                    view.setUint16(22, 0); // reserved
+                    view.setUint32(24, audioTimescale << 16); // samplerate
+            
+                    data.set(esdsBox, 28);
+            
+                    return createBox('mp4a', data);
+                }
+            
+                function createEsdsBox() {
+                    const data = new Uint8Array(39);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint32(0, 0); // version and flags
+            
+                    // ES_Descriptor
+                    data[4] = 0x03; // ES_DescrTag
+                    data[5] = 23; // size
+                    view.setUint16(6, 0x0000); // ES_ID
+                    data[8] = 0; // streamDependenceFlag, URL_Flag, reserved
+            
+                    // DecoderConfigDescriptor
+                    data[9] = 0x04; // DecoderConfigDescrTag
+                    data[10] = 15; // size
+                    data[11] = 0x40; // objectTypeIndication
+                    data[12] = 0x15; // streamType, upstream, reserved
+                    view.setUint24(13, 0); // bufferSizeDB
+                    view.setUint32(16, 0); // maxBitrate
+                    view.setUint32(20, 0); // avgBitrate
+            
+                    // DecoderSpecificInfo
+                    data[24] = 0x05; // DecSpecificInfoTag
+                    data[25] = 2; // size
+                    data[26] = 0x11; // AudioSpecificConfig (AAC LC)
+                    data[27] = 0x90;
+            
+                    // SLConfigDescriptor
+                    data[28] = 0x06; // SLConfigDescrTag
+                    data[29] = 1; // size
+                    data[30] = 0x02;
+            
+                    return createBox('esds', data);
+                }
+            
+                function createSttsBox(chunks) {
+                    const data = new Uint8Array(16);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint32(0, 0); // version and flags
+                    view.setUint32(4, 1); // entry_count
+                    view.setUint32(8, chunks.length); // sample_count
+                    view.setUint32(12, videoSampleDelta); // sample_delta
+            
+                    return createBox('stts', data);
+                }
+            
+                function createAudioSttsBox(chunks) {
+                    const data = new Uint8Array(16);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint32(0, 0); // version and flags
+                    view.setUint32(4, 1); // entry_count
+                    view.setUint32(8, chunks.length); // sample_count
+                    view.setUint32(12, 1024); // sample_delta (AAC frames are typically 1024 samples)
+            
+                    return createBox('stts', data);
+                }
+            
+                function createStscBox(chunkCount) {
+                    const data = new Uint8Array(20);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint32(0, 0); // version and flags
+                    view.setUint32(4, 1); // entry_count
+                    view.setUint32(8, 1); // first_chunk
+                    view.setUint32(12, 1); // samples_per_chunk
+                    view.setUint32(16, 1); // sample_description_index
+            
+                    return createBox('stsc', data);
+                }
+            
+                function createStszBox(chunks) {
+                    const data = new Uint8Array(12 + chunks.length * 4);
+                    const view = new DataView(data.buffer);
+            
+                    view.setUint32(0, 0); // version and flags
+                    view.setUint32(4, 0); // sample_size
+                    view.setUint32(8, chunks.length); // sample_count
+            
+                    let offset = 12;
+                    for (const chunk of chunks) {
+                        view.setUint32(offset, chunk.data.length);
+                        offset += 4;
+                    }
+            
+                    return createBox('stsz', data);
+                }
+            
+                function createStcoBox(chunks, otherChunks, isAudio = false) {
+                const data = new Uint8Array(8 + chunks.length * 4);
+                const view = new DataView(data.buffer);
+
+                view.setUint32(0, 0); // version and flags
+                view.setUint32(4, chunks.length); // entry_count
+
+                let offset = 8;
+                let mdatStart = ftypBox.length + 8; // mdat header size
+                let currentOffset = mdatStart;
+
+                // Combine chunks in the order they appear in mdat
+                const allChunks = [...videoChunks, ...audioChunks];
+
+                for (const chunk of allChunks) {
+                    if (!chunk || !chunk.data) {
+                        console.error('Invalid chunk encountered in createStcoBox:', chunk);
+                        throw new Error('Invalid chunk in createStcoBox');
+                    }
+                    if ((isAudio && audioChunks.includes(chunk)) || (!isAudio && videoChunks.includes(chunk))) {
+                        view.setUint32(offset, currentOffset);
+                        offset += 4;
+                    }
+                    currentOffset += chunk.data.length;
+                }
+
+                return createBox('stco', data);
+            }
+                              
+            
+                function createStblBox(stsdBox, sttsBox, stscBox, stszBox, stcoBox) {
+                    return createBox('stbl', stsdBox, sttsBox, stscBox, stszBox, stcoBox);
+                }
+            
+                function createMinfBox(mediaHeaderBox, dinfBox, stblBox) {
+                    return createBox('minf', mediaHeaderBox, dinfBox, stblBox);
+                }
+            
+                function createMdiaBox(mdhdBox, hdlrBox, minfBox) {
+                    return createBox('mdia', mdhdBox, hdlrBox, minfBox);
+                }
+            
+                function createTrakBox(tkhdBox, mdiaBox) {
+                    return createBox('trak', tkhdBox, mdiaBox);
+                }
+            }            
+            
+            function concatUint8Arrays(arrays) {
+                let totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
+                let result = new Uint8Array(totalLength);
+                let offset = 0;
+                for (let arr of arrays) {
+                    result.set(arr, offset);
+                    offset += arr.length;
+                }
+                return result;
+            }
+
+            DataView.prototype.setUint24 = function (byteOffset, value) {
+                this.setUint8(byteOffset, (value >> 16) & 0xff);
+                this.setUint8(byteOffset + 1, (value >> 8) & 0xff);
+                this.setUint8(byteOffset + 2, value & 0xff);
+            };
+            
+
+        });
+    </script>
+</body>
+</html>
