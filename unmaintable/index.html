@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>MP4 Video Converter</title>
+    <style>
+        body { font-family: "Courier New", monospace; margin: 10px; }
+        #progress { margin-top: 15px; }
+        #barWrapper { width: 98%; background-color: #ccc; }
+        #barFill { width: 0%; height: 18px; background-color: #88d; }
+        video { display: none; }
+    </style>
+</head>
+<body>
+    <h2>MP4 Video Converter</h2>
+    <input id="inputVideo" type="file" accept="video/*"><br><br>
+    <label for="codecOption">Output Codec:</label>
+    <select id="codecOption">
+        <option value="avc1.42E01E">H.264 (MP4)</option>
+    </select><br><br>
+    <button id="transcodeButton">Start Conversion</button>
+    <button id="downloadButton" disabled>Download Video</button>
+    <div id="progressMessage"></div>
+    <div id="barWrapper"><div id="barFill"></div></div>
+
+    <script>
+        let fileInput = document.getElementById('inputVideo'), codecSelect = document.getElementById('codecOption'), transcodeBtn = document.getElementById('transcodeButton'), downloadBtn = document.getElementById('downloadButton');
+        let progressText = document.getElementById('progressMessage'), barFill = document.getElementById('barFill'), selectedFile, selectedCodec, videoBlob = null, videoData = [], audioData = [], duration, width, height, totalFrames, sps, pps, videoStream, fps = 30;
+
+        downloadBtn.onclick = function() {
+            if (!videoBlob) {
+                alert('No converted file available for download.');
+                return;
+            }
+            let url = URL.createObjectURL(videoBlob), anchor = document.createElement('a');
+            anchor.style.display = 'none';
+            anchor.href = url;
+            anchor.download = `converted_video_${selectedCodec}.mp4`;
+            document.body.appendChild(anchor);
+            anchor.click();
+            document.body.removeChild(anchor);
+            URL.revokeObjectURL(url);
+        };
+
+        transcodeBtn.onclick = async function() {
+            if (!fileInput.files[0]) {
+                alert('Please select a video file.');
+                return;
+            }
+            selectedFile = fileInput.files[0];
+            selectedCodec = codecSelect.value;
+            transcodeBtn.disabled = true;
+            downloadBtn.disabled = true;
+            progressText.textContent = 'Initializing...';
+
+            let arrayBuffer = await selectedFile.arrayBuffer();
+            let videoFileBlob = new Blob([arrayBuffer], { type: selectedFile.type });
+            let videoElement = document.createElement('video');
+            videoElement.src = URL.createObjectURL(videoFileBlob);
+
+            await new Promise(resolve => videoElement.addEventListener('loadedmetadata', resolve));
+            width = videoElement.videoWidth;
+            height = videoElement.videoHeight;
+            duration = videoElement.duration;
+            totalFrames = Math.ceil(duration * fps);
+
+            let codecSupported = await VideoEncoder.isConfigSupported({ codec: selectedCodec, width, height });
+            if (!codecSupported.supported) {
+                alert('Video codec not supported.');
+                transcodeBtn.disabled = false;
+                return;
+            }
+
+            let audioSupported = await AudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2 });
+            if (!audioSupported.supported) {
+                alert('Audio codec not supported.');
+                transcodeBtn.disabled = false;
+                return;
+            }
+
+            let mediaStream = videoElement.captureStream(fps);
+            let videoTrack = mediaStream.getVideoTracks()[0];
+            let audioTrack = mediaStream.getAudioTracks()[0];
+
+            let videoProcessor = new MediaStreamTrackProcessor(videoTrack);
+            let videoReader = videoProcessor.readable.getReader();
+            let audioProcessor = new MediaStreamTrackProcessor(audioTrack);
+            let audioReader = audioProcessor.readable.getReader();
+
+            let videoEncoderConfig = {
+                codec: selectedCodec,
+                width,
+                height,
+                bitrate: 5_000_000,
+                avc: { format: 'annexb' }
+            };
+
+            let videoEncoder = new VideoEncoder({
+                output: chunk => handleVideoChunk(chunk),
+                error: err => console.error('Video encoding error:', err)
+            });
+
+            videoEncoder.configure(videoEncoderConfig);
+
+            let audioEncoderConfig = {
+                codec: 'mp4a.40.2',
+                sampleRate: 48000,
+                numberOfChannels: 2,
+                bitrate: 128_000
+            };
+
+            let audioEncoder = new AudioEncoder({
+                output: chunk => handleAudioChunk(chunk),
+                error: err => console.error('Audio encoding error:', err)
+            });
+
+            audioEncoder.configure(audioEncoderConfig);
+
+            videoElement.play();
+            processVideoFrame();
+            processAudioFrame();
+
+            let videoComplete = false, audioComplete = false;
+
+            async function processVideoFrame() {
+                let { done, value: videoFrame } = await videoReader.read();
+                if (done) {
+                    await videoEncoder.flush();
+                    videoComplete = true;
+                    finalizeEncoding();
+                    return;
+                }
+                videoEncoder.encode(videoFrame, { timestamp: videoFrame.timestamp });
+                videoFrame.close();
+                updateProgress();
+                processVideoFrame();
+            }
+
+            async function processAudioFrame() {
+                let { done, value: audioFrame } = await audioReader.read();
+                if (done) {
+                    await audioEncoder.flush();
+                    audioComplete = true;
+                    finalizeEncoding();
+                    return;
+                }
+                audioEncoder.encode(audioFrame);
+                audioFrame.close();
+                processAudioFrame();
+            }
+
+            function handleVideoChunk(chunk) {
+                let chunkData = new Uint8Array(chunk.byteLength);
+                chunk.copyTo(chunkData);
+                if (chunk.type === 'key' && selectedCodec.startsWith('avc1')) {
+                    let { sps: extractedSps, pps: extractedPps } = parseNALUnits(chunkData);
+                    if (extractedSps && !sps) sps = extractedSps;
+                    if (extractedPps && !pps) pps = extractedPps;
+                }
+                videoData.push(chunkData);
+            }
+
+            function handleAudioChunk(chunk) {
+                let chunkData = new Uint8Array(chunk.byteLength);
+                chunk.copyTo(chunkData);
+                audioData.push(chunkData);
+            }
+
+            function updateProgress() {
+                let progressPercentage = ((videoData.length / totalFrames) * 100).toFixed(2);
+                progressText.textContent = `Transcoding... ${videoData.length}/${totalFrames} frames processed (${progressPercentage}%)`;
+                barFill.style.width = `${progressPercentage}%`;
+            }
+
+            function finalizeEncoding() {
+                if (videoComplete && audioComplete) {
+                    progressText.textContent = 'Finalizing MP4 file...';
+                    assembleMP4File();
+                }
+            }
+
+            function assembleMP4File() {
+                if (!sps || !pps) {
+                    alert('Failed to extract SPS and PPS. MP4 creation failed.');
+                    transcodeBtn.disabled = false;
+                    progressText.textContent = 'Transcoding failed.';
+                    return;
+                }
+                videoBlob = new Blob(videoData, { type: 'video/mp4' });
+                downloadBtn.disabled = false;
+                transcodeBtn.disabled = false;
+                progressText.textContent = 'Transcoding complete!';
+                barFill.style.width = '100%';
+                videoElement.pause();
+                videoElement.src = '';
+            }
+
+            function parseNALUnits(data) {
+                let offset = 0, sps = null, pps = null;
+                while (offset < data.byteLength - 3) {
+                    let startCodeLength = 0;
+                    if (data[offset] === 0x00 && data[offset + 1] === 0x00) {
+                        if (data[offset + 2] === 0x01) startCodeLength = 3;
+                        else if (data[offset + 2] === 0x00 && data[offset + 3] === 0x01) startCodeLength = 4;
+                    }
+                    if (startCodeLength > 0) {
+                        offset += startCodeLength;
+                        let nalType = data[offset] & 0x1f;
+                        let nalUnitStart = offset;
+                        offset++;
+                        let nalUnitEnd = data.byteLength;
+                        for (let i = offset; i < data.byteLength - 3; i++) {
+                            if (data[i] === 0x00 && data[i + 1] === 0x00 &&
+                                (data[i + 2] === 0x01 || (data[i + 2] === 0x00 && data[i + 3] === 0x01))) {
+                                nalUnitEnd = i;
+                                break;
+                            }
+                        }
+                        let nalUnit = data.slice(nalUnitStart, nalUnitEnd);
+                        if (nalType === 7 && !sps) sps = nalUnit;
+                        if (nalType === 8 && !pps) pps = nalUnit;
+                        offset = nalUnitEnd;
+                    } else {
+                        offset++;
+                    }
+                }
+                return { sps, pps };
+            }
+        };
+    </script>
+</body>
+</html>
