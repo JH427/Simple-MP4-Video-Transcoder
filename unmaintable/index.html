@@ -1,231 +1,183 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
     <meta charset="UTF-8">
-    <title>MP4 Video Converter</title>
+    <title>Video Transmogrifier</title>
     <style>
-        body { font-family: "Courier New", monospace; margin: 10px; }
-        #progress { margin-top: 15px; }
-        #barWrapper { width: 98%; background-color: #ccc; }
-        #barFill { width: 0%; height: 18px; background-color: #88d; }
-        video { display: none; }
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #prog { margin-top: 9px; }
+        #progBr {
+            width: calc(99% + 1%);
+            background-color: rgba(221, 221, 221, 0.9);
+        }
+        #pbFill {
+            width: calc(0%);
+            height: 20px;
+            background-color: rgba(76, 175, 80, 1);
+        }
+        vid { display: none; }
     </style>
 </head>
 <body>
-    <h2>MP4 Video Converter</h2>
-    <input id="inputVideo" type="file" accept="video/*"><br><br>
-    <label for="codecOption">Output Codec:</label>
-    <select id="codecOption">
-        <option value="avc1.42E01E">H.264 (MP4)</option>
+    <h1>Video Transmogrifier to Something</h1>
+    <input type="file" id="inputFile" accept="video/*"><br><br>
+    <label for="codecDropdown">Codec Thing:</label>
+    <select id="codecDropdown">
+        <option value="avc1.42E01E">H.264</option>
     </select><br><br>
-    <button id="transcodeButton">Start Conversion</button>
-    <button id="downloadButton" disabled>Download Video</button>
-    <div id="progressMessage"></div>
-    <div id="barWrapper"><div id="barFill"></div></div>
+    <button id="beginButton">Do Stuff</button>
+    <button id="grabButton" disabled>Get File</button>
+    <div id="prog"></div>
+    <div id="progBr">
+        <div id="pbFill"></div>
+    </div>
 
     <script>
-        let fileInput = document.getElementById('inputVideo'), codecSelect = document.getElementById('codecOption'), transcodeBtn = document.getElementById('transcodeButton'), downloadBtn = document.getElementById('downloadButton');
-        let progressText = document.getElementById('progressMessage'), barFill = document.getElementById('barFill'), selectedFile, selectedCodec, videoBlob = null, videoData = [], audioData = [], duration, width, height, totalFrames, sps, pps, videoStream, fps = 30;
-
-        downloadBtn.onclick = function() {
-            if (!videoBlob) {
-                alert('No converted file available for download.');
-                return;
+        let fI = document.getElementById('inputFile'), cS = document.getElementById('codecDropdown'),
+            bS = document.getElementById('beginButton'), dB = document.getElementById('grabButton'), 
+            pD = document.getElementById('prog'), pbF = document.getElementById('pbFill'), 
+            eG = null, zY = null, aZ = null, az, za, ys=0, aa = false, aD=false;
+        
+        dB.onclick = function() {
+            if (!eG) {
+                alert('No data!'); return;
             }
-            let url = URL.createObjectURL(videoBlob), anchor = document.createElement('a');
-            anchor.style.display = 'none';
-            anchor.href = url;
-            anchor.download = `converted_video_${selectedCodec}.mp4`;
-            document.body.appendChild(anchor);
-            anchor.click();
-            document.body.removeChild(anchor);
-            URL.revokeObjectURL(url);
+            let q = URL.createObjectURL(eG);
+            let e = document.createElement('a'); 
+            e.style.display = 'none';
+            e.href = q; 
+            e.download = 'output_'+ zY +'.mp4'; 
+            document.body.appendChild(e); e.click(); 
+            document.body.removeChild(e); 
+            URL.revokeObjectURL(q);
         };
 
-        transcodeBtn.onclick = async function() {
-            if (!fileInput.files[0]) {
-                alert('Please select a video file.');
-                return;
+        bS.onclick = async function() {
+            if (!fI.files[0]) {
+                alert('Pick a thing!'); return;
             }
-            selectedFile = fileInput.files[0];
-            selectedCodec = codecSelect.value;
-            transcodeBtn.disabled = true;
-            downloadBtn.disabled = true;
-            progressText.textContent = 'Initializing...';
-
-            let arrayBuffer = await selectedFile.arrayBuffer();
-            let videoFileBlob = new Blob([arrayBuffer], { type: selectedFile.type });
-            let videoElement = document.createElement('video');
-            videoElement.src = URL.createObjectURL(videoFileBlob);
-
-            await new Promise(resolve => videoElement.addEventListener('loadedmetadata', resolve));
-            width = videoElement.videoWidth;
-            height = videoElement.videoHeight;
-            duration = videoElement.duration;
-            totalFrames = Math.ceil(duration * fps);
-
-            let codecSupported = await VideoEncoder.isConfigSupported({ codec: selectedCodec, width, height });
-            if (!codecSupported.supported) {
-                alert('Video codec not supported.');
-                transcodeBtn.disabled = false;
-                return;
+            let tR = fI.files[0]; zY = cS.value; 
+            bS.disabled = dB.disabled = true; 
+            pD.innerHTML = 'Wait...'; 
+            let b = await tR.arrayBuffer();
+            let d = new Blob([b], { type: tR.type }), mS = URL.createObjectURL(d), 
+            v = document.createElement('video'); v.src = mS;
+            await new Promise(a => { v.onloadedmetadata = a; });
+            let f = 30, t = Math.ceil(v.duration * f), w = v.videoWidth, h = v.videoHeight, 
+            sD = await VideoEncoder.isConfigSupported({ codec: zY, width: w, height: h }); 
+            if (!sD.supported) {
+                alert('No codec.'); bS.disabled = false; return;
             }
-
-            let audioSupported = await AudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2 });
-            if (!audioSupported.supported) {
-                alert('Audio codec not supported.');
-                transcodeBtn.disabled = false;
-                return;
+            let aCodec = 'mp4a.40.2', aSupport = await AudioEncoder.isConfigSupported({ codec: aCodec, sampleRate: 48000, numberOfChannels: 2 });
+            if (!aSupport.supported) {
+                alert('No audio codec.'); bS.disabled = false; return;
             }
+            let n = v.captureStream(f), vT = n.getVideoTracks()[0], aT = n.getAudioTracks()[0]; 
+            if (!aT) { alert('No audio!'); bS.disabled = false; return; }
+            let vP = new MediaStreamTrackProcessor(vT), aP = new MediaStreamTrackProcessor(aT), 
+                vR = vP.readable.getReader(), aRdr = aP.readable.getReader(),
+                eV = [], eA = [], fC = 0, s = null, p = null;
 
-            let mediaStream = videoElement.captureStream(fps);
-            let videoTrack = mediaStream.getVideoTracks()[0];
-            let audioTrack = mediaStream.getAudioTracks()[0];
-
-            let videoProcessor = new MediaStreamTrackProcessor(videoTrack);
-            let videoReader = videoProcessor.readable.getReader();
-            let audioProcessor = new MediaStreamTrackProcessor(audioTrack);
-            let audioReader = audioProcessor.readable.getReader();
-
-            let videoEncoderConfig = {
-                codec: selectedCodec,
-                width,
-                height,
-                bitrate: 5_000_000,
-                avc: { format: 'annexb' }
-            };
-
-            let videoEncoder = new VideoEncoder({
-                output: chunk => handleVideoChunk(chunk),
-                error: err => console.error('Video encoding error:', err)
-            });
-
-            videoEncoder.configure(videoEncoderConfig);
-
-            let audioEncoderConfig = {
-                codec: 'mp4a.40.2',
-                sampleRate: 48000,
-                numberOfChannels: 2,
-                bitrate: 128_000
-            };
-
-            let audioEncoder = new AudioEncoder({
-                output: chunk => handleAudioChunk(chunk),
-                error: err => console.error('Audio encoding error:', err)
-            });
-
-            audioEncoder.configure(audioEncoderConfig);
-
-            videoElement.play();
-            processVideoFrame();
-            processAudioFrame();
-
-            let videoComplete = false, audioComplete = false;
-
-            async function processVideoFrame() {
-                let { done, value: videoFrame } = await videoReader.read();
-                if (done) {
-                    await videoEncoder.flush();
-                    videoComplete = true;
-                    finalizeEncoding();
-                    return;
-                }
-                videoEncoder.encode(videoFrame, { timestamp: videoFrame.timestamp });
-                videoFrame.close();
-                updateProgress();
-                processVideoFrame();
-            }
-
-            async function processAudioFrame() {
-                let { done, value: audioFrame } = await audioReader.read();
-                if (done) {
-                    await audioEncoder.flush();
-                    audioComplete = true;
-                    finalizeEncoding();
-                    return;
-                }
-                audioEncoder.encode(audioFrame);
-                audioFrame.close();
-                processAudioFrame();
-            }
-
-            function handleVideoChunk(chunk) {
-                let chunkData = new Uint8Array(chunk.byteLength);
-                chunk.copyTo(chunkData);
-                if (chunk.type === 'key' && selectedCodec.startsWith('avc1')) {
-                    let { sps: extractedSps, pps: extractedPps } = parseNALUnits(chunkData);
-                    if (extractedSps && !sps) sps = extractedSps;
-                    if (extractedPps && !pps) pps = extractedPps;
-                }
-                videoData.push(chunkData);
-            }
-
-            function handleAudioChunk(chunk) {
-                let chunkData = new Uint8Array(chunk.byteLength);
-                chunk.copyTo(chunkData);
-                audioData.push(chunkData);
-            }
-
-            function updateProgress() {
-                let progressPercentage = ((videoData.length / totalFrames) * 100).toFixed(2);
-                progressText.textContent = `Transcoding... ${videoData.length}/${totalFrames} frames processed (${progressPercentage}%)`;
-                barFill.style.width = `${progressPercentage}%`;
-            }
-
-            function finalizeEncoding() {
-                if (videoComplete && audioComplete) {
-                    progressText.textContent = 'Finalizing MP4 file...';
-                    assembleMP4File();
-                }
-            }
-
-            function assembleMP4File() {
-                if (!sps || !pps) {
-                    alert('Failed to extract SPS and PPS. MP4 creation failed.');
-                    transcodeBtn.disabled = false;
-                    progressText.textContent = 'Transcoding failed.';
-                    return;
-                }
-                videoBlob = new Blob(videoData, { type: 'video/mp4' });
-                downloadBtn.disabled = false;
-                transcodeBtn.disabled = false;
-                progressText.textContent = 'Transcoding complete!';
-                barFill.style.width = '100%';
-                videoElement.pause();
-                videoElement.src = '';
-            }
-
-            function parseNALUnits(data) {
-                let offset = 0, sps = null, pps = null;
-                while (offset < data.byteLength - 3) {
-                    let startCodeLength = 0;
-                    if (data[offset] === 0x00 && data[offset + 1] === 0x00) {
-                        if (data[offset + 2] === 0x01) startCodeLength = 3;
-                        else if (data[offset + 2] === 0x00 && data[offset + 3] === 0x01) startCodeLength = 4;
+            let vE = new VideoEncoder({
+                output(x) {
+                    let u = new Uint8Array(x.byteLength); x.copyTo(u); 
+                    if (x.type === 'key' && zY.startsWith('avc1')) {
+                        let { sps: ss, pps: pp } = gNAL(u); 
+                        if (ss && !s) { s = ss; console.log('s', s); }
+                        if (pp && !p) { p = pp; console.log('p', p); }
                     }
-                    if (startCodeLength > 0) {
-                        offset += startCodeLength;
-                        let nalType = data[offset] & 0x1f;
-                        let nalUnitStart = offset;
-                        offset++;
-                        let nalUnitEnd = data.byteLength;
-                        for (let i = offset; i < data.byteLength - 3; i++) {
-                            if (data[i] === 0x00 && data[i + 1] === 0x00 &&
-                                (data[i + 2] === 0x01 || (data[i + 2] === 0x00 && data[i + 3] === 0x01))) {
-                                nalUnitEnd = i;
-                                break;
-                            }
+                    eV.push({ data: kData(u), type: x.type, timestamp: x.timestamp, duration: x.duration });
+                    fC++; let n = ((fC / t) * 100).toFixed(2);
+                    pD.innerHTML = `Doing stuff... ${fC}/${t} (${n}%)`;
+                    pbF.style.width = `${n}%`;
+                },
+                error(x) { console.log('Oh no:', x); }
+            });
+            vE.configure({ codec: zY, width: w, height: h, bitrate: 5000000, hardwareAcceleration: 'prefer-hardware', avc: { format: 'annexb' } });
+            let aE = new AudioEncoder({
+                output(q) { let o = new Uint8Array(q.byteLength); q.copyTo(o); eA.push({ data: o, timestamp: q.timestamp, duration: q.duration }); },
+                error(q) { console.log('Oh no:', q); alert('No audio!'); }
+            });
+            aE.configure({ codec: aCodec, sampleRate: 48000, numberOfChannels: 2, bitrate: 128000 });
+
+            async function jF() { let r = await vR.read(); if (r.done) { await vE.flush(); aa=true; kP(); return; } let x = r.value; vE.encode(x); x.close(); jF(); }
+            async function gF() { let r = await aRdr.read(); if (r.done) { await aE.flush(); aD=true; kP(); return; } let y = r.value; aE.encode(y); y.close(); gF(); }
+            v.play(); jF(); gF();
+
+            function kP() { if (aa && aD) { fMP4(); } }
+
+            function fMP4() {
+                if (!s || !p) { alert('Failed!'); bS.disabled = false; pD.innerHTML = 'Error.'; return; }
+                console.log('eV:', eV); console.log('eA:', eA);
+                if (!eA || eA.length === 0) { alert('Audio failed.'); eA = []; }
+                pD.innerHTML = 'Finalizing...';
+                let q = mkMP4(eV, eA, w, h, s, p, f, v.duration);
+                eG = new Blob([q], { type: 'video/mp4' });
+                dB.disabled = bS.disabled = false;
+                pD.innerHTML = 'Done.';
+                pbF.style.width = `100%`;
+                v.pause(); v.src = '';
+            }
+
+            function gNAL(e) { let a=0, s=null, p=null;
+                while (a<e.byteLength-3) { let l=0;
+                    if (e[a]===0x00 && e[a+1]===0x00) { if (e[a+2]===0x01) { l=3; } else if (e[a+2]===0x00 && e[a+3]===0x01) { l=4; } }
+                    if (l>0) { a+=l; if (a>=e.byteLength) break;
+                        let t=e[a]&0x1f, st=a; a++;
+                        let eE=e.byteLength; for (let i=a;i<e.byteLength-3;i++) { if (e[i]===0x00&&e[i+1]===0x00&&(e[i+2]===0x01||(e[i+2]===0x00&&e[i+3]===0x01))) { eE=i; break; } }
+                        let q=e.slice(st, eE); if (t===7&&!s) { s=q; console.log('Found s'); } else if (t===8&&!p) { p=q; console.log('Found p'); }
+                        a=eE;
+                    } else a++;
+                }
+                return { sps:s, pps:p };
+            }
+
+            function kData(q) { let r = [], o = 0;
+                while (o < q.byteLength) { let s = -1, e = q.byteLength;
+                    if (q[o] === 0x00 && q[o+1] === 0x00) {
+                        if (q[o+2] === 0x01) { s = o + 3; } 
+                        else if (q[o+2] === 0x00 && q[o+3] === 0x01) { s = o + 4; }
+                    }
+                    if (s === -1) break;
+                    for (let i=s; i<q.byteLength-3; i++) {
+                        if (q[i]===0x00 && q[i+1]===0x00 && (q[i+2]===0x01 || (q[i+2]===0x00 && q[i+3]===0x01))) {
+                            e = i; break;
                         }
-                        let nalUnit = data.slice(nalUnitStart, nalUnitEnd);
-                        if (nalType === 7 && !sps) sps = nalUnit;
-                        if (nalType === 8 && !pps) pps = nalUnit;
-                        offset = nalUnitEnd;
-                    } else {
-                        offset++;
                     }
+                    let qU = q.slice(s, e), l = qU.length, lB = new Uint8Array(4), v = new DataView(lB.buffer);
+                    v.setUint32(0, l); r.push(lB, qU); o = e;
                 }
-                return { sps, pps };
+                return catArrays(r);
             }
+
+            function mkMP4(x,a,w,h,s,p,f,d) { let ts=90000,aTs=48000,tV=1,tA=2,dV=Math.round(d*ts),dA=Math.round(d*aTs),sD=Math.round(ts/f);
+                function cb(t,...pl) { let sz=8+pl.reduce((a,c)=>a+c.length,0),bf=new Uint8Array(sz),vw=new DataView(bf.buffer);
+                    vw.setUint32(0,sz); bf.set([t.charCodeAt(0),t.charCodeAt(1),t.charCodeAt(2),t.charCodeAt(3)],4);
+                    let o=8; pl.forEach(d=>{ bf.set(d,o); o+=d.length; }); return bf; }
+                let hA=a.length>0?true:false, fTp=ftBox(), mB=catArrays([ ...x.map(c=>c.data),...a.map(c=>c.data) ]),mD=cb('mdat',mB),
+                mV=mvBox(),vR=catArrays([fTp,mD,mV]); return vR;
+
+                function ftBox() { let mb='isom',mv=new Uint8Array([0,0,0,1]),cb='isomiso2avc1mp41',dt=new Uint8Array(4+4+cb.length),o=0;
+                    for(let i=0;i<4;i++)dt[o++]=mb.charCodeAt(i);dt.set(mv,o);o+=4;for(let i=0;i<cb.length;i++)dt[o++]=cb.charCodeAt(i); return cb('ftyp',dt); }
+
+                function mvBox() { let mVh=mvHdBox(ts,dV),vTr=vidTrack(),bx=[mVh,vTr]; if(a.length>0) { let aT=audTrack(); bx.push(aT); } return cb('moov',...bx); }
+                
+                function mvHdBox(ts,d) { let dU=new Uint8Array(108),vw=new DataView(dU.buffer);
+                    vw.setUint8(0,0); vw.setUint32(4,0); vw.setUint32(8,0); vw.setUint32(12,ts); vw.setUint32(16,d); vw.setUint32(20,0x00010000); vw.setUint16(24,0x0100);
+                    return cb('mvhd',dU); }
+                function vidTrack() { let tk=trKBox(tV,dV,w,h),md=mediaBox(ts,dV); return cb('trak',tk,md); }
+                function audTrack() { let tk=trKBox(tA,dA,0,0),md=mediaBox(aTs,dA); return cb('trak',tk,md); }
+
+                function trKBox(id, dur, w, h) { let d=new Uint8Array(92),vw=new DataView(d.buffer); vw.setUint8(0,0); vw.setUint32(4,0x00000007); vw.setUint32(8,0); vw.setUint32(12,0);
+                    vw.setUint32(16,id); vw.setUint32(20,0); vw.setUint32(24,dur); vw.setUint16(40,id===tA?0x0100:0); vw.setUint32(80,w<<16); vw.setUint32(84,h<<16); return cb('tkhd',d); }
+                function mediaBox(ts,dur) { let mdHd=mediaHeader(ts,dur),hdlr=hdBox('vide','VideoHandler'),sTs=timescaleBox(x),bl=stBl(sTs); return cb('mdia',mdHd,hdlr,bl); }
+                function mediaHeader(ts,dur) { let dU=new Uint8Array(32),vw=new DataView(dU.buffer); vw.setUint8(0,0); vw.setUint32(4,0); vw.setUint32(8,0); vw.setUint32(12,ts); vw.setUint32(16,dur); return cb('mdhd',dU); }
+                function hdBox(ht,n) { let nB=new TextEncoder().encode(n),d=new Uint8Array(24+nB.length+1),vw=new DataView(d.buffer); vw.setUint8(0,0); for(let i=0;i<4;i++)d[8+i]=ht.charCodeAt(i);
+                    d.set(nB,24); d[24+nB.length]=0; return cb('hdlr',d); }
+                function timescaleBox(c) { let s=cb('stsd',aVC(s,p,w,h)),cT=cb('stts',c),stBl=cb('stbl',s,cT); return stBl; }
+            }
+
+            function catArrays(r){let tL=r.reduce((a,c)=>a+c.length,0),fR=new Uint8Array(tL),o=0;r.forEach(arr=>{fR.set(arr,o);o+=arr.length});return fR;}
         };
     </script>
 </body>
